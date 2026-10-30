@@ -98,6 +98,206 @@ app.get('/api/me', requireUser, (request, response) => {
   response.json(request.user)
 })
 
+app.post('/api/entries', requireUser, async (request, response, next) => {
+  if (request.user.role !== 'applicant') {
+    response.status(403).json({ error: 'forbidden' })
+    return
+  }
+
+  const categoryIdText = request.body?.categoryId
+  const categoryId = Number(categoryIdText)
+  const { title, summary } = request.body ?? {}
+  if (
+    (typeof categoryIdText !== 'number' && typeof categoryIdText !== 'string') ||
+    !/^[1-9]\d*$/.test(String(categoryIdText)) ||
+    !Number.isSafeInteger(categoryId) ||
+    typeof title !== 'string' ||
+    title.trim().length === 0 ||
+    typeof summary !== 'string' ||
+    summary.trim().length === 0
+  ) {
+    response.status(400).json({ error: 'invalid_entry' })
+    return
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO entries (category_id, applicant_id, title, summary)
+       SELECT id, $2, $3, $4
+       FROM categories
+       WHERE id = $1
+       RETURNING id, category_id AS "categoryId",
+                 applicant_id AS "applicantId", title, summary, status,
+                 submitted_at AS "submittedAt"`,
+      [categoryId, request.user.id, title.trim(), summary.trim()],
+    )
+    if (rows.length === 0) {
+      response.status(400).json({ error: 'invalid_category' })
+      return
+    }
+
+    const entry = rows[0]
+    response.status(201).json({
+      ...entry,
+      id: Number(entry.id),
+      categoryId: Number(entry.categoryId),
+      applicantId: Number(entry.applicantId),
+      submittedAt: null,
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.patch('/api/entries/:id', requireUser, async (request, response, next) => {
+  if (request.user.role !== 'applicant') {
+    response.status(403).json({ error: 'forbidden' })
+    return
+  }
+
+  const entryIdText = request.params.id
+  const entryId = Number(entryIdText)
+  if (!/^[1-9]\d*$/.test(entryIdText) || !Number.isSafeInteger(entryId)) {
+    response.status(404).json({ error: 'not_found' })
+    return
+  }
+
+  const body = request.body
+  const fields = ['title', 'summary']
+  if (
+    body === null ||
+    typeof body !== 'object' ||
+    Array.isArray(body) ||
+    Object.keys(body).length === 0 ||
+    Object.keys(body).some((key) => !fields.includes(key)) ||
+    fields.some(
+      (field) =>
+        Object.hasOwn(body, field) &&
+        (typeof body[field] !== 'string' || body[field].trim().length === 0),
+    )
+  ) {
+    response.status(400).json({ error: 'invalid_entry' })
+    return
+  }
+
+  const title = Object.hasOwn(body, 'title') ? body.title.trim() : null
+  const summary = Object.hasOwn(body, 'summary') ? body.summary.trim() : null
+
+  try {
+    const { rows } = await pool.query(
+      `UPDATE entries
+       SET title = COALESCE($3, title),
+           summary = COALESCE($4, summary)
+       WHERE id = $1 AND applicant_id = $2 AND status = 'draft'
+       RETURNING id, category_id AS "categoryId",
+                 applicant_id AS "applicantId", title, summary, status,
+                 submitted_at AS "submittedAt"`,
+      [entryId, request.user.id, title, summary],
+    )
+
+    if (rows.length === 0) {
+      const { rows: ownedEntries } = await pool.query(
+        `SELECT status
+         FROM entries
+         WHERE id = $1 AND applicant_id = $2`,
+        [entryId, request.user.id],
+      )
+      if (ownedEntries[0]?.status === 'submitted') {
+        response.status(409).json({ error: 'already_submitted' })
+        return
+      }
+
+      response.status(404).json({ error: 'not_found' })
+      return
+    }
+
+    const entry = rows[0]
+    response.json({
+      ...entry,
+      id: Number(entry.id),
+      categoryId: Number(entry.categoryId),
+      applicantId: Number(entry.applicantId),
+      submittedAt: entry.submittedAt
+        ? new Date(entry.submittedAt).toISOString()
+        : null,
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
+app.post(
+  '/api/entries/:id/submit',
+  requireUser,
+  async (request, response, next) => {
+    if (request.user.role !== 'applicant') {
+      response.status(403).json({ error: 'forbidden' })
+      return
+    }
+
+    const entryIdText = request.params.id
+    const entryId = Number(entryIdText)
+    if (!/^[1-9]\d*$/.test(entryIdText) || !Number.isSafeInteger(entryId)) {
+      response.status(404).json({ error: 'not_found' })
+      return
+    }
+
+    try {
+      const { rows } = await pool.query(
+        `UPDATE entries AS e
+         SET status = 'submitted', submitted_at = NOW()
+         FROM categories AS c
+         WHERE e.id = $1
+           AND e.applicant_id = $2
+           AND e.status = 'draft'
+           AND c.id = e.category_id
+           AND c.deadline > NOW()
+         RETURNING e.id, e.category_id AS "categoryId",
+                   e.applicant_id AS "applicantId", e.title, e.summary,
+                   e.status, e.submitted_at AS "submittedAt"`,
+        [entryId, request.user.id],
+      )
+
+      if (rows.length === 0) {
+        const { rows: ownedEntries } = await pool.query(
+          `SELECT e.status, c.deadline <= NOW() AS "deadlinePassed"
+           FROM entries AS e
+           JOIN categories AS c ON c.id = e.category_id
+           WHERE e.id = $1 AND e.applicant_id = $2`,
+          [entryId, request.user.id],
+        )
+        const ownedEntry = ownedEntries[0]
+        if (!ownedEntry) {
+          response.status(404).json({ error: 'not_found' })
+          return
+        }
+        if (ownedEntry.status === 'submitted') {
+          response.status(409).json({ error: 'already_submitted' })
+          return
+        }
+        if (ownedEntry.deadlinePassed) {
+          response.status(409).json({ error: 'deadline_passed' })
+          return
+        }
+
+        response.status(404).json({ error: 'not_found' })
+        return
+      }
+
+      const entry = rows[0]
+      response.json({
+        ...entry,
+        id: Number(entry.id),
+        categoryId: Number(entry.categoryId),
+        applicantId: Number(entry.applicantId),
+        submittedAt: new Date(entry.submittedAt).toISOString(),
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
 app.post('/api/programmes', requireUser, async (request, response, next) => {
   if (!requireOrganiser(request, response)) {
     return

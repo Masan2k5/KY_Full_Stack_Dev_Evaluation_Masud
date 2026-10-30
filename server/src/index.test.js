@@ -7,6 +7,7 @@ const server = app.listen(0)
 const address = server.address()
 const baseUrl = `http://127.0.0.1:${address.port}`
 const createdProgrammeIds = new Set()
+const createdEntryIds = new Set()
 
 async function createProgramme(organiserId, name = `Test ${randomUUID()}`) {
   const response = await fetch(`${baseUrl}/api/programmes`, {
@@ -35,6 +36,63 @@ async function postCategory(organiserId, programmeId, body) {
   })
 }
 
+async function createCategory(
+  organiserId,
+  programmeId,
+  deadlineLocal = '2099-12-31T23:59',
+) {
+  const response = await postCategory(organiserId, programmeId, {
+    name: `Category ${randomUUID()}`,
+    deadlineLocal,
+  })
+
+  assert.equal(response.status, 201)
+  return response.json()
+}
+
+async function postEntry(applicantId, body) {
+  return fetch(`${baseUrl}/api/entries`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-User-Id': String(applicantId),
+    },
+    body: JSON.stringify(body),
+  })
+}
+
+async function createEntry(applicantId, categoryId, body = {}) {
+  const response = await postEntry(applicantId, {
+    categoryId,
+    title: `Entry ${randomUUID()}`,
+    summary: 'A short description',
+    ...body,
+  })
+
+  assert.equal(response.status, 201)
+  const entry = await response.json()
+  createdEntryIds.add(entry.id)
+  return entry
+}
+
+async function patchEntry(applicantId, entryId, body) {
+  return fetch(`${baseUrl}/api/entries/${entryId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-User-Id': String(applicantId),
+    },
+    body: JSON.stringify(body),
+  })
+}
+
+async function submitEntry(applicantId, entryId) {
+  return fetch(`${baseUrl}/api/entries/${entryId}/submit`, {
+    method: 'POST',
+    headers: { 'X-User-Id': String(applicantId) },
+  })
+}
+
 async function closeJudging(organiserId, programmeId) {
   return fetch(`${baseUrl}/api/programmes/${programmeId}/close-judging`, {
     method: 'POST',
@@ -53,6 +111,12 @@ after(async () => {
     server.close((error) => (error ? reject(error) : resolve()))
   })
 
+  if (createdEntryIds.size > 0) {
+    await pool.query(
+      'DELETE FROM entries WHERE id = ANY($1::bigint[])',
+      [[...createdEntryIds]],
+    )
+  }
   if (createdProgrammeIds.size > 0) {
     await pool.query(
       'DELETE FROM programmes WHERE id = ANY($1::bigint[])',
@@ -238,4 +302,199 @@ test('categories endpoint rejects missing or unknown user IDs', async () => {
 
   const unknownUserResponse = await getCategories(999)
   assert.equal(unknownUserResponse.status, 401)
+})
+
+test('applicant can create a draft entry with the required response', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const title = `Entry ${randomUUID()}`
+  const summary = 'A short description'
+  const response = await postEntry(201, {
+    categoryId: category.id,
+    title,
+    summary,
+  })
+
+  assert.equal(response.status, 201)
+  const entry = await response.json()
+  createdEntryIds.add(entry.id)
+  assert.deepEqual(entry, {
+    id: entry.id,
+    categoryId: category.id,
+    applicantId: 201,
+    title,
+    summary,
+    status: 'draft',
+    submittedAt: null,
+  })
+})
+
+test('entry creation rejects missing or invalid fields', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const invalidEntries = [
+    { title: 'Entry', summary: 'Summary' },
+    { categoryId: category.id, summary: 'Summary' },
+    { categoryId: category.id, title: 'Entry' },
+    { categoryId: 'not-an-id', title: 'Entry', summary: 'Summary' },
+    { categoryId: category.id, title: '   ', summary: 'Summary' },
+    { categoryId: category.id, title: 'Entry', summary: '   ' },
+  ]
+
+  for (const body of invalidEntries) {
+    const response = await postEntry(201, body)
+    assert.equal(response.status, 400, JSON.stringify(body))
+  }
+})
+
+test('entry creation rejects a category that does not exist', async () => {
+  const response = await postEntry(201, {
+    categoryId: 999999999,
+    title: 'Entry',
+    summary: 'A short description',
+  })
+
+  assert.equal(response.status, 400)
+})
+
+test('entry creation rejects users who are not applicants', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const response = await postEntry(1, {
+    categoryId: category.id,
+    title: 'Entry',
+    summary: 'A short description',
+  })
+
+  assert.equal(response.status, 403)
+})
+
+test('applicant can update their own draft title, summary, or both', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+
+  const titleEntry = await createEntry(201, category.id)
+  const titleResponse = await patchEntry(201, titleEntry.id, {
+    title: 'Updated title',
+  })
+  assert.equal(titleResponse.status, 200)
+  assert.deepEqual(await titleResponse.json(), {
+    ...titleEntry,
+    title: 'Updated title',
+  })
+
+  const summaryEntry = await createEntry(201, category.id)
+  const summaryResponse = await patchEntry(201, summaryEntry.id, {
+    summary: 'Updated summary',
+  })
+  assert.equal(summaryResponse.status, 200)
+  assert.deepEqual(await summaryResponse.json(), {
+    ...summaryEntry,
+    summary: 'Updated summary',
+  })
+
+  const bothEntry = await createEntry(201, category.id)
+  const bothResponse = await patchEntry(201, bothEntry.id, {
+    title: 'Updated title and summary',
+    summary: 'Updated together',
+  })
+  assert.equal(bothResponse.status, 200)
+  assert.deepEqual(await bothResponse.json(), {
+    ...bothEntry,
+    title: 'Updated title and summary',
+    summary: 'Updated together',
+  })
+})
+
+test('applicant cannot update another applicant’s draft entry', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const entry = await createEntry(201, category.id)
+  const response = await patchEntry(202, entry.id, { title: 'Not yours' })
+
+  assert.equal(response.status, 404)
+})
+
+test('draft entry update rejects empty, invalid, or missing fields', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const entry = await createEntry(201, category.id)
+
+  for (const body of [
+    {},
+    { title: '' },
+    { title: '   ' },
+    { title: 42 },
+    { summary: null },
+    { summary: '   ' },
+    { summary: false },
+  ]) {
+    const response = await patchEntry(201, entry.id, body)
+    assert.equal(response.status, 400, JSON.stringify(body))
+  }
+})
+
+test('submitted entry cannot be edited', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const entry = await createEntry(201, category.id)
+  await pool.query(
+    `UPDATE entries
+     SET status = 'submitted', submitted_at = NOW()
+     WHERE id = $1 AND applicant_id = $2`,
+    [entry.id, 201],
+  )
+
+  const response = await patchEntry(201, entry.id, { title: 'Too late' })
+  assert.equal(response.status, 409)
+  assert.deepEqual(await response.json(), { error: 'already_submitted' })
+})
+
+test('applicant can submit their draft before the category deadline', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const entry = await createEntry(201, category.id)
+  const response = await submitEntry(201, entry.id)
+
+  assert.equal(response.status, 200)
+  const submittedEntry = await response.json()
+  assert.deepEqual(submittedEntry, {
+    ...entry,
+    status: 'submitted',
+    submittedAt: submittedEntry.submittedAt,
+  })
+  assert.match(submittedEntry.submittedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+  assert.ok(Number.isFinite(Date.parse(submittedEntry.submittedAt)))
+})
+
+test('submission after the category deadline returns deadline_passed', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id, '2000-01-01T00:00')
+  const entry = await createEntry(201, category.id)
+  const response = await submitEntry(201, entry.id)
+
+  assert.equal(response.status, 409)
+  assert.deepEqual(await response.json(), { error: 'deadline_passed' })
+})
+
+test('submitting an entry a second time returns already_submitted', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const entry = await createEntry(201, category.id)
+
+  const firstResponse = await submitEntry(201, entry.id)
+  assert.equal(firstResponse.status, 200)
+
+  const secondResponse = await submitEntry(201, entry.id)
+  assert.equal(secondResponse.status, 409)
+  assert.deepEqual(await secondResponse.json(), { error: 'already_submitted' })
+})
+
+test('another applicant cannot submit an entry they do not own', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const entry = await createEntry(201, category.id)
+  const response = await submitEntry(202, entry.id)
+
+  assert.equal(response.status, 404)
 })
