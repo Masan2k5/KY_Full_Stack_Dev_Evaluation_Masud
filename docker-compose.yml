@@ -1,0 +1,15 @@
+#Created with AI to assist in filling the contents of the file.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: awards
+      POSTGRES_PASSWORD: awards_dev_only
+      POSTGRES_DB: awards
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
