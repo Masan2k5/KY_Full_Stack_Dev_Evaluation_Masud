@@ -26,4 +26,4 @@
 - The first judge-visibility test assumed the database contained no assignments from earlier test runs. Its failure exposed that assumption; I changed it to assert visibility and exclusion for entries created by that test, independent of unrelated existing rows.
 
 ## Suggestions I rejected
-- None so far.
+- AI initially showed the Step 3 commit message as: "S3: add judge assignments and entry access". I rejected that and instead changed the commit message to "S3 (Step 3): Add judge assignments and entry access" as that explains the S3 naming even better.
