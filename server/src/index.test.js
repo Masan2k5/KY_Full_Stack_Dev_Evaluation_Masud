@@ -93,6 +93,38 @@ async function submitEntry(applicantId, entryId) {
   })
 }
 
+async function createSubmittedEntry(organiserId, applicantId) {
+  const programme = await createProgramme(organiserId)
+  const category = await createCategory(organiserId, programme.id)
+  const entry = await createEntry(applicantId, category.id)
+  const response = await submitEntry(applicantId, entry.id)
+  assert.equal(response.status, 200)
+  return { programme, entry }
+}
+
+async function assignJudge(organiserId, entryId, judgeId) {
+  return fetch(`${baseUrl}/api/entries/${entryId}/assignments`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-User-Id': String(organiserId),
+    },
+    body: JSON.stringify({ judgeId }),
+  })
+}
+
+async function getJudgeEntries(judgeId) {
+  return fetch(`${baseUrl}/api/judge/entries`, {
+    headers: { 'X-User-Id': String(judgeId) },
+  })
+}
+
+async function getEntry(userId, entryId) {
+  return fetch(`${baseUrl}/api/entries/${entryId}`, {
+    headers: { 'X-User-Id': String(userId) },
+  })
+}
+
 async function closeJudging(organiserId, programmeId) {
   return fetch(`${baseUrl}/api/programmes/${programmeId}/close-judging`, {
     method: 'POST',
@@ -497,4 +529,104 @@ test('another applicant cannot submit an entry they do not own', async () => {
   const response = await submitEntry(202, entry.id)
 
   assert.equal(response.status, 404)
+})
+
+test('owning organiser assigns a judge to a submitted entry', async () => {
+  const { entry } = await createSubmittedEntry(1, 201)
+  const response = await assignJudge(1, entry.id, 101)
+
+  assert.equal(response.status, 201)
+})
+
+test('repeating a judge assignment returns 200 without creating a duplicate', async () => {
+  const { entry } = await createSubmittedEntry(1, 201)
+  const firstResponse = await assignJudge(1, entry.id, 101)
+  assert.equal(firstResponse.status, 201)
+
+  const secondResponse = await assignJudge(1, entry.id, 101)
+  assert.equal(secondResponse.status, 200)
+
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS count
+     FROM judge_assignments
+     WHERE entry_id = $1 AND judge_id = $2`,
+    [entry.id, 101],
+  )
+  assert.equal(rows[0].count, 1)
+})
+
+test('assignment rejects a user who is not a judge', async () => {
+  const { entry } = await createSubmittedEntry(1, 201)
+  const response = await assignJudge(1, entry.id, 201)
+
+  assert.equal(response.status, 400)
+})
+
+test('assignment rejects a draft entry with not_submitted', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const entry = await createEntry(201, category.id)
+  const response = await assignJudge(1, entry.id, 101)
+
+  assert.equal(response.status, 409)
+  assert.deepEqual(await response.json(), { error: 'not_submitted' })
+})
+
+test('non-owning organiser cannot assign a judge to the entry', async () => {
+  const { entry } = await createSubmittedEntry(1, 201)
+  const response = await assignJudge(2, entry.id, 101)
+
+  assert.equal(response.status, 404)
+})
+
+test('judge sees only their assigned submitted entries with contract fields', async () => {
+  const { entry: assignedEntry } = await createSubmittedEntry(1, 201)
+  const { entry: otherJudgeEntry } = await createSubmittedEntry(1, 202)
+  const { entry: unassignedEntry } = await createSubmittedEntry(1, 203)
+
+  assert.equal((await assignJudge(1, assignedEntry.id, 101)).status, 201)
+  assert.equal((await assignJudge(1, otherJudgeEntry.id, 102)).status, 201)
+
+  const response = await getJudgeEntries(101)
+  assert.equal(response.status, 200)
+  const entries = await response.json()
+
+  const visibleAssignedEntry = entries.find(({ id }) => id === assignedEntry.id)
+  assert.deepEqual(visibleAssignedEntry, {
+    id: assignedEntry.id,
+    categoryId: assignedEntry.categoryId,
+    title: assignedEntry.title,
+    myScore: null,
+  })
+  assert.ok(entries.every(({ id }) =>
+    id !== otherJudgeEntry.id && id !== unassignedEntry.id,
+  ))
+})
+
+test('non-judge cannot access the judge entries list', async () => {
+  const response = await getJudgeEntries(1)
+
+  assert.equal(response.status, 403)
+})
+
+test('entry is visible to its applicant, owning organiser, and assigned judge only', async () => {
+  const { entry } = await createSubmittedEntry(1, 201)
+  assert.equal((await assignJudge(1, entry.id, 101)).status, 201)
+
+  for (const userId of [201, 1, 101]) {
+    const response = await getEntry(userId, entry.id)
+    assert.equal(response.status, 200)
+    const result = await response.json()
+    assert.equal(result.id, entry.id)
+    assert.equal(result.categoryId, entry.categoryId)
+    assert.equal(result.applicantId, 201)
+    assert.equal(result.title, entry.title)
+    assert.equal(result.status, 'submitted')
+  }
+
+  for (const userId of [202, 102, 2]) {
+    const response = await getEntry(userId, entry.id)
+    assert.equal(response.status, 404)
+    assert.deepEqual(await response.json(), { error: 'not_found' })
+  }
 })

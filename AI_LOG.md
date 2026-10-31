@@ -13,12 +13,17 @@
 - Asked AI to implement the applicant-only `POST /api/entries` draft creation route.
 - Asked AI to add and implement tests for editing draft entries, owner checks, invalid fields, and submitted-entry conflicts.
 - Asked AI to add and implement submission tests for deadline enforcement, duplicate submissions, and applicant ownership.
+- Asked AI to add S3 judge-assignment tests for owner access, idempotent repeats, invalid judges, draft entries, and organiser ownership.
+- Asked AI to implement `POST /api/entries/:id/assignments` with database-side ownership and submission checks.
+- Asked AI to test and implement the judge-only assigned entries list, including assigned-entry visibility and role restrictions.
+- Asked AI to test and implement individual entry access for applicants, owning organisers, assigned judges, and unauthorized users.
 
 ## AI mistakes, gaps, and how I checked
 - The initial setup guidance described the project structure before the backend files existed. I checked the directory and package files, then had the backend starter files added.
 - The initial tests cover only the health endpoint and rejection of `/api/me` without a user header. I reviewed the test file and confirmed they do not cover the main award workflows.
 - The setup was tested in my current environment, not on a completely clean machine. I should not claim clean-machine verification until I perform it.
 - At the last steps of completing S1, AI suggested me to still implement the close-judging route and GET/api/categories while it was not mentioned in the previous steps AI suggested, AI still done it anyway when I implemented them step-by-step.
+- The first judge-visibility test assumed the database contained no assignments from earlier test runs. Its failure exposed that assumption; I changed it to assert visibility and exclusion for entries created by that test, independent of unrelated existing rows.
 
 ## Suggestions I rejected
 - None so far.

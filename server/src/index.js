@@ -98,6 +98,64 @@ app.get('/api/me', requireUser, (request, response) => {
   response.json(request.user)
 })
 
+app.get('/api/entries/:id', requireUser, async (request, response, next) => {
+  const entryIdText = request.params.id
+  const entryId = Number(entryIdText)
+  if (!/^[1-9]\d*$/.test(entryIdText) || !Number.isSafeInteger(entryId)) {
+    response.status(404).json({ error: 'not_found' })
+    return
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT e.id, e.category_id AS "categoryId",
+              e.applicant_id AS "applicantId", e.title, e.summary,
+              e.status, e.submitted_at AS "submittedAt"
+       FROM entries AS e
+       WHERE e.id = $1
+         AND (
+           e.applicant_id = $2
+           OR (
+             $3 = 'organiser'
+             AND EXISTS (
+               SELECT 1
+               FROM categories AS c
+               JOIN programmes AS p ON p.id = c.programme_id
+               WHERE c.id = e.category_id AND p.organiser_id = $2
+             )
+           )
+           OR (
+             $3 = 'judge'
+             AND EXISTS (
+               SELECT 1
+               FROM judge_assignments AS ja
+               WHERE ja.entry_id = e.id AND ja.judge_id = $2
+             )
+           )
+         )`,
+      [entryId, request.user.id, request.user.role],
+    )
+
+    if (rows.length === 0) {
+      response.status(404).json({ error: 'not_found' })
+      return
+    }
+
+    const entry = rows[0]
+    response.json({
+      ...entry,
+      id: Number(entry.id),
+      categoryId: Number(entry.categoryId),
+      applicantId: Number(entry.applicantId),
+      submittedAt: entry.submittedAt
+        ? new Date(entry.submittedAt).toISOString()
+        : null,
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
 app.post('/api/entries', requireUser, async (request, response, next) => {
   if (request.user.role !== 'applicant') {
     response.status(403).json({ error: 'forbidden' })
@@ -297,6 +355,132 @@ app.post(
     }
   },
 )
+
+app.post(
+  '/api/entries/:id/assignments',
+  requireUser,
+  async (request, response, next) => {
+    if (!requireOrganiser(request, response)) {
+      return
+    }
+
+    const entryIdText = request.params.id
+    const entryId = Number(entryIdText)
+    const judgeIdText = request.body?.judgeId
+    const judgeId = Number(judgeIdText)
+    if (
+      !/^[1-9]\d*$/.test(entryIdText) ||
+      !Number.isSafeInteger(entryId) ||
+      (typeof judgeIdText !== 'number' && typeof judgeIdText !== 'string') ||
+      !/^[1-9]\d*$/.test(String(judgeIdText)) ||
+      !Number.isSafeInteger(judgeId)
+    ) {
+      response.status(400).json({ error: 'invalid_assignment' })
+      return
+    }
+
+    try {
+      const { rows: judges } = await pool.query(
+        `SELECT id
+         FROM users
+         WHERE id = $1 AND role = 'judge'`,
+        [judgeId],
+      )
+      if (judges.length === 0) {
+        response.status(400).json({ error: 'invalid_judge' })
+        return
+      }
+
+      const { rows: assignments } = await pool.query(
+        `INSERT INTO judge_assignments (entry_id, judge_id)
+         SELECT e.id, $3
+         FROM entries AS e
+         JOIN categories AS c ON c.id = e.category_id
+         JOIN programmes AS p ON p.id = c.programme_id
+         WHERE e.id = $1
+           AND e.status = 'submitted'
+           AND p.organiser_id = $2
+         ON CONFLICT (entry_id, judge_id) DO NOTHING
+         RETURNING entry_id AS "entryId", judge_id AS "judgeId"`,
+        [entryId, request.user.id, judgeId],
+      )
+
+      if (assignments.length > 0) {
+        response.status(201).json({
+          entryId: Number(assignments[0].entryId),
+          judgeId: Number(assignments[0].judgeId),
+        })
+        return
+      }
+
+      const { rows: existingAssignments } = await pool.query(
+        `SELECT ja.entry_id AS "entryId", ja.judge_id AS "judgeId"
+         FROM judge_assignments AS ja
+         JOIN entries AS e ON e.id = ja.entry_id
+         JOIN categories AS c ON c.id = e.category_id
+         JOIN programmes AS p ON p.id = c.programme_id
+         WHERE ja.entry_id = $1
+           AND ja.judge_id = $3
+           AND e.status = 'submitted'
+           AND p.organiser_id = $2`,
+        [entryId, request.user.id, judgeId],
+      )
+      if (existingAssignments.length > 0) {
+        response.status(200).json({
+          entryId: Number(existingAssignments[0].entryId),
+          judgeId: Number(existingAssignments[0].judgeId),
+        })
+        return
+      }
+
+      const { rows: entries } = await pool.query(
+        `SELECT e.status
+         FROM entries AS e
+         JOIN categories AS c ON c.id = e.category_id
+         JOIN programmes AS p ON p.id = c.programme_id
+         WHERE e.id = $1 AND p.organiser_id = $2`,
+        [entryId, request.user.id],
+      )
+      if (entries[0]?.status === 'draft') {
+        response.status(409).json({ error: 'not_submitted' })
+        return
+      }
+
+      response.status(404).json({ error: 'not_found' })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
+app.get('/api/judge/entries', requireUser, async (request, response, next) => {
+  if (request.user.role !== 'judge') {
+    response.status(403).json({ error: 'forbidden' })
+    return
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `SELECT e.id, e.category_id AS "categoryId", e.title,
+              s.score AS "myScore"
+       FROM judge_assignments AS ja
+       JOIN entries AS e ON e.id = ja.entry_id
+       LEFT JOIN scores AS s
+         ON s.entry_id = ja.entry_id AND s.judge_id = ja.judge_id
+       WHERE ja.judge_id = $1 AND e.status = 'submitted'
+       ORDER BY e.id`,
+      [request.user.id],
+    )
+    response.json(rows.map((entry) => ({
+      ...entry,
+      id: Number(entry.id),
+      categoryId: Number(entry.categoryId),
+      myScore: entry.myScore === null ? null : Number(entry.myScore),
+    })))
+  } catch (error) {
+    next(error)
+  }
+})
 
 app.post('/api/programmes', requireUser, async (request, response, next) => {
   if (!requireOrganiser(request, response)) {
