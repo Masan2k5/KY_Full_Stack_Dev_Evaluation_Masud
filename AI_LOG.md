@@ -22,6 +22,8 @@
 - Asked AI to add a concurrent score-update test confirming one score row remains with one of the submitted values.
 - Asked AI to add S5 leaderboard tests for eligibility, average rounding, tie ordering, pagination, and organiser ownership.
 - Asked AI to implement the S5 leaderboard API with database-side aggregation, stable ordering, pagination, and positive-page validation.
+- Asked AI to replace the Vite starter screen with a judge workspace that lists assigned entries and lets judges select an entry.
+- Asked AI to implement judge score saving with the required API request, success state, updated displayed score, and visible failure messages.
 
 ## AI mistakes, gaps, and how I checked
 - The initial setup guidance described the project structure before the backend files existed. I checked the directory and package files, then had the backend starter files added.
