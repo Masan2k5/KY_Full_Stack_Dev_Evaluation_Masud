@@ -618,6 +618,95 @@ app.get('/api/categories', requireUser, async (_request, response, next) => {
   }
 })
 
+app.get(
+  '/api/categories/:id/leaderboard',
+  requireUser,
+  async (request, response, next) => {
+    if (!requireOrganiser(request, response)) {
+      return
+    }
+
+    const categoryIdText = request.params.id
+    const categoryId = Number(categoryIdText)
+    if (
+      !/^[1-9]\d*$/.test(categoryIdText) ||
+      !Number.isSafeInteger(categoryId)
+    ) {
+      response.status(404).json({ error: 'not_found' })
+      return
+    }
+
+    const pageText = request.query.page ?? '1'
+    const page = Number(pageText)
+    const offset = (page - 1) * 20
+    if (
+      typeof pageText !== 'string' ||
+      !/^[1-9]\d*$/.test(pageText) ||
+      !Number.isSafeInteger(page) ||
+      !Number.isSafeInteger(offset)
+    ) {
+      response.status(400).json({ error: 'invalid_page' })
+      return
+    }
+
+    try {
+      const { rows: ownedCategories } = await pool.query(
+        `SELECT 1
+         FROM categories AS c
+         JOIN programmes AS p ON p.id = c.programme_id
+         WHERE c.id = $1 AND p.organiser_id = $2`,
+        [categoryId, request.user.id],
+      )
+      if (ownedCategories.length === 0) {
+        response.status(404).json({ error: 'not_found' })
+        return
+      }
+
+      const { rows: countRows } = await pool.query(
+        `SELECT COUNT(*)::int AS "totalEntries"
+         FROM entries AS e
+         WHERE e.category_id = $1
+           AND e.status = 'submitted'
+           AND EXISTS (
+             SELECT 1 FROM scores AS s WHERE s.entry_id = e.id
+           )`,
+        [categoryId],
+      )
+      const totalEntries = countRows[0].totalEntries
+      const pageSize = 20
+      const totalPages = Math.ceil(totalEntries / pageSize)
+
+      const { rows } = await pool.query(
+        `SELECT e.id AS "entryId", e.title,
+                ROUND(AVG(s.score)::numeric, 2) AS "averageScore",
+                COUNT(*)::int AS "scoreCount"
+         FROM entries AS e
+         JOIN scores AS s ON s.entry_id = e.id
+         WHERE e.category_id = $1 AND e.status = 'submitted'
+         GROUP BY e.id, e.title
+         ORDER BY AVG(s.score) DESC, e.id ASC
+         LIMIT $2 OFFSET $3`,
+        [categoryId, pageSize, offset],
+      )
+
+      response.json({
+        page,
+        pageSize,
+        totalEntries,
+        totalPages,
+        items: rows.map((item) => ({
+          entryId: Number(item.entryId),
+          title: item.title,
+          averageScore: Number(item.averageScore),
+          scoreCount: item.scoreCount,
+        })),
+      })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
+
 app.post(
   '/api/programmes/:id/categories',
   requireUser,

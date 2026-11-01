@@ -124,6 +124,28 @@ async function saveScore(judgeId, entryId, body) {
   })
 }
 
+async function getLeaderboard(organiserId, categoryId, page = 1) {
+  return fetch(
+    `${baseUrl}/api/categories/${categoryId}/leaderboard?page=${page}`,
+    { headers: { 'X-User-Id': String(organiserId) } },
+  )
+}
+
+async function createSubmittedEntryInCategory(applicantId, categoryId) {
+  const entry = await createEntry(applicantId, categoryId)
+  const response = await submitEntry(applicantId, entry.id)
+  assert.equal(response.status, 200)
+  return entry
+}
+
+async function assignAndScore(organiserId, entryId, judgeId, score) {
+  const assignmentResponse = await assignJudge(organiserId, entryId, judgeId)
+  assert.equal(assignmentResponse.status, 201)
+
+  const scoreResponse = await saveScore(judgeId, entryId, { score })
+  assert.equal(scoreResponse.status, 200)
+}
+
 async function getJudgeEntries(judgeId) {
   return fetch(`${baseUrl}/api/judge/entries`, {
     headers: { 'X-User-Id': String(judgeId) },
@@ -762,4 +784,108 @@ test('non-judge cannot save a score', async () => {
 
   const response = await saveScore(1, entry.id, { score: 6 })
   assert.equal(response.status, 403)
+})
+
+test('leaderboard includes only submitted scored entries with averages and stable tie ordering', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const firstTiedEntry = await createSubmittedEntryInCategory(201, category.id)
+  const secondTiedEntry = await createSubmittedEntryInCategory(202, category.id)
+  const unscoredEntry = await createSubmittedEntryInCategory(203, category.id)
+  const draftEntry = await createEntry(204, category.id)
+
+  for (const [judgeId, score] of [[101, 8], [102, 9], [103, 9]]) {
+    await assignAndScore(1, firstTiedEntry.id, judgeId, score)
+    await assignAndScore(1, secondTiedEntry.id, judgeId, score)
+  }
+
+  const response = await getLeaderboard(1, category.id)
+  assert.equal(response.status, 200)
+  const result = await response.json()
+
+  assert.deepEqual(Object.keys(result).sort(), [
+    'items',
+    'page',
+    'pageSize',
+    'totalEntries',
+    'totalPages',
+  ])
+  assert.equal(result.page, 1)
+  assert.equal(result.pageSize, 20)
+  assert.equal(result.totalEntries, 2)
+  assert.equal(result.totalPages, 1)
+  assert.deepEqual(result.items, [
+    {
+      entryId: firstTiedEntry.id,
+      title: firstTiedEntry.title,
+      averageScore: 8.67,
+      scoreCount: 3,
+    },
+    {
+      entryId: secondTiedEntry.id,
+      title: secondTiedEntry.title,
+      averageScore: 8.67,
+      scoreCount: 3,
+    },
+  ])
+  assert.ok(!result.items.some(({ entryId }) =>
+    [unscoredEntry.id, draftEntry.id].includes(entryId),
+  ))
+})
+
+test('leaderboard paginates more than 20 scored entries in stable tie order', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const entryIds = []
+
+  for (let index = 0; index < 21; index += 1) {
+    const applicantId = 201 + (index % 60)
+    const entry = await createSubmittedEntryInCategory(applicantId, category.id)
+    entryIds.push(entry.id)
+    await assignAndScore(1, entry.id, 101, 7)
+  }
+
+  const firstPageResponse = await getLeaderboard(1, category.id, 1)
+  assert.equal(firstPageResponse.status, 200)
+  const firstPage = await firstPageResponse.json()
+  assert.equal(firstPage.page, 1)
+  assert.equal(firstPage.pageSize, 20)
+  assert.equal(firstPage.totalEntries, 21)
+  assert.equal(firstPage.totalPages, 2)
+  assert.deepEqual(
+    firstPage.items.map(({ entryId }) => entryId),
+    entryIds.slice().sort((left, right) => left - right).slice(0, 20),
+  )
+
+  const secondPageResponse = await getLeaderboard(1, category.id, 2)
+  assert.equal(secondPageResponse.status, 200)
+  const secondPage = await secondPageResponse.json()
+  assert.equal(secondPage.page, 2)
+  assert.equal(secondPage.pageSize, 20)
+  assert.equal(secondPage.totalEntries, 21)
+  assert.equal(secondPage.totalPages, 2)
+  assert.deepEqual(
+    secondPage.items.map(({ entryId }) => entryId),
+    entryIds.slice().sort((left, right) => left - right).slice(20),
+  )
+})
+
+test('organiser cannot view another organiser’s category leaderboard', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const response = await getLeaderboard(2, category.id)
+
+  assert.equal(response.status, 404)
+  assert.deepEqual(await response.json(), { error: 'not_found' })
+})
+
+test('leaderboard rejects malformed page numbers with invalid_page', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+
+  for (const page of ['0', '-1', '1.5', 'not-a-number']) {
+    const response = await getLeaderboard(1, category.id, page)
+    assert.equal(response.status, 400, page)
+    assert.deepEqual(await response.json(), { error: 'invalid_page' })
+  }
 })
