@@ -205,6 +205,27 @@ test('me endpoint rejects requests without a user header', async () => {
   assert.deepEqual(await response.json(), { error: 'unauthorized' })
 })
 
+test('me endpoint returns the authenticated user and rejects invalid identities', async () => {
+  const response = await fetch(`${baseUrl}/api/me`, {
+    headers: { 'X-User-Id': '101' },
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), {
+    id: 101,
+    name: 'Judge 101',
+    role: 'judge',
+    organisationId: 1,
+  })
+
+  for (const userId of ['not-a-number', '999999']) {
+    const invalidResponse = await fetch(`${baseUrl}/api/me`, {
+      headers: { 'X-User-Id': userId },
+    })
+    assert.equal(invalidResponse.status, 401)
+    assert.deepEqual(await invalidResponse.json(), { error: 'unauthorized' })
+  }
+})
+
 test('organiser can create a programme with the required response', async () => {
   const name = `Test ${randomUUID()}`
   const programme = await createProgramme(1, name)
@@ -254,6 +275,37 @@ test('non-organiser cannot create or list programmes', async () => {
     headers: { 'X-User-Id': '201' },
   })
   assert.equal(listResponse.status, 403)
+  assert.deepEqual(await createResponse.json(), { error: 'forbidden' })
+  assert.deepEqual(await listResponse.json(), { error: 'forbidden' })
+})
+
+test('programme creation and listing enforce exact validation and auth errors', async () => {
+  for (const body of [{}, { name: '  ' }, { name: 42 }]) {
+    const response = await fetch(`${baseUrl}/api/programmes`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-User-Id': '1',
+      },
+      body: JSON.stringify(body),
+    })
+    assert.equal(response.status, 400)
+    assert.deepEqual(await response.json(), { error: 'invalid_name' })
+  }
+
+  for (const headers of [{}, { 'X-User-Id': '999999' }]) {
+    const response = await fetch(`${baseUrl}/api/programmes`, { headers })
+    assert.equal(response.status, 401)
+    assert.deepEqual(await response.json(), { error: 'unauthorized' })
+  }
+
+  const ownedProgramme = await createProgramme(1)
+  const listResponse = await fetch(`${baseUrl}/api/programmes`, {
+    headers: { 'X-User-Id': '1' },
+  })
+  assert.equal(listResponse.status, 200)
+  const programmes = await listResponse.json()
+  assert.deepEqual(programmes.find(({ id }) => id === ownedProgramme.id), ownedProgramme)
 })
 
 test('owning organiser creates a category with Singapore deadline returned in UTC', async () => {
@@ -285,7 +337,14 @@ test('category creation rejects malformed or impossible deadlines', async () => 
       deadlineLocal,
     })
     assert.equal(response.status, 400, deadlineLocal)
+    assert.deepEqual(await response.json(), { error: 'invalid_deadline' })
   }
+
+  const missingDeadlineResponse = await postCategory(1, programme.id, {
+    name: 'Design',
+  })
+  assert.equal(missingDeadlineResponse.status, 400)
+  assert.deepEqual(await missingDeadlineResponse.json(), { error: 'invalid_deadline' })
 })
 
 test('category creation rejects an empty name', async () => {
@@ -296,6 +355,7 @@ test('category creation rejects an empty name', async () => {
   })
 
   assert.equal(response.status, 400)
+  assert.deepEqual(await response.json(), { error: 'invalid_name' })
 })
 
 test('category creation returns 404 for a missing programme', async () => {
@@ -305,6 +365,7 @@ test('category creation returns 404 for a missing programme', async () => {
   })
 
   assert.equal(response.status, 404)
+  assert.deepEqual(await response.json(), { error: 'not_found' })
 })
 
 test('organiser cannot create a category under another organiser’s programme', async () => {
@@ -315,6 +376,37 @@ test('organiser cannot create a category under another organiser’s programme',
   })
 
   assert.equal(response.status, 404)
+  assert.deepEqual(await response.json(), { error: 'not_found' })
+})
+
+test('category creation rejects invalid IDs, non-organisers, and invalid auth', async () => {
+  for (const programmeId of ['0', 'not-an-id']) {
+    const response = await postCategory(1, programmeId, {
+      name: 'Design',
+      deadlineLocal: '2099-12-31T23:59',
+    })
+    assert.equal(response.status, 404)
+    assert.deepEqual(await response.json(), { error: 'not_found' })
+  }
+
+  const programme = await createProgramme(1)
+  const forbiddenResponse = await postCategory(101, programme.id, {
+    name: 'Design',
+    deadlineLocal: '2099-12-31T23:59',
+  })
+  assert.equal(forbiddenResponse.status, 403)
+  assert.deepEqual(await forbiddenResponse.json(), { error: 'forbidden' })
+
+  const missingUserResponse = await fetch(
+    `${baseUrl}/api/programmes/${programme.id}/categories`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Design', deadlineLocal: '2099-12-31T23:59' }),
+    },
+  )
+  assert.equal(missingUserResponse.status, 401)
+  assert.deepEqual(await missingUserResponse.json(), { error: 'unauthorized' })
 })
 
 test('owning organiser can close judging for their programme', async () => {
@@ -344,6 +436,19 @@ test('organiser cannot close judging for another organiser’s programme', async
   )
 })
 
+test('closing judging rejects invalid IDs and non-organisers with exact errors', async () => {
+  for (const programmeId of ['0', 'not-an-id', '999999999']) {
+    const response = await closeJudging(1, programmeId)
+    assert.equal(response.status, 404)
+    assert.deepEqual(await response.json(), { error: 'not_found' })
+  }
+
+  const programme = await createProgramme(1)
+  const response = await closeJudging(101, programme.id)
+  assert.equal(response.status, 403)
+  assert.deepEqual(await response.json(), { error: 'forbidden' })
+})
+
 test('authenticated users can list categories created through the API', async () => {
   const programme = await createProgramme(1)
   const categoryResponse = await postCategory(1, programme.id, {
@@ -357,16 +462,18 @@ test('authenticated users can list categories created through the API', async ()
     const response = await getCategories(userId)
     assert.equal(response.status, 200)
     const categories = await response.json()
-    assert.ok(categories.some(({ id }) => id === category.id))
+    assert.deepEqual(categories.find(({ id }) => id === category.id), category)
   }
 })
 
 test('categories endpoint rejects missing or unknown user IDs', async () => {
   const missingUserResponse = await getCategories()
   assert.equal(missingUserResponse.status, 401)
+  assert.deepEqual(await missingUserResponse.json(), { error: 'unauthorized' })
 
   const unknownUserResponse = await getCategories(999)
   assert.equal(unknownUserResponse.status, 401)
+  assert.deepEqual(await unknownUserResponse.json(), { error: 'unauthorized' })
 })
 
 test('applicant can create a draft entry with the required response', async () => {
@@ -409,6 +516,7 @@ test('entry creation rejects missing or invalid fields', async () => {
   for (const body of invalidEntries) {
     const response = await postEntry(201, body)
     assert.equal(response.status, 400, JSON.stringify(body))
+    assert.deepEqual(await response.json(), { error: 'invalid_entry' })
   }
 })
 
@@ -420,6 +528,7 @@ test('entry creation rejects a category that does not exist', async () => {
   })
 
   assert.equal(response.status, 400)
+  assert.deepEqual(await response.json(), { error: 'invalid_category' })
 })
 
 test('entry creation rejects users who are not applicants', async () => {
@@ -432,6 +541,21 @@ test('entry creation rejects users who are not applicants', async () => {
   })
 
   assert.equal(response.status, 403)
+  assert.deepEqual(await response.json(), { error: 'forbidden' })
+})
+
+test('entry creation rejects unauthenticated applicants with the auth error contract', async () => {
+  const response = await fetch(`${baseUrl}/api/entries`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      categoryId: 1,
+      title: 'Entry',
+      summary: 'A short description',
+    }),
+  })
+  assert.equal(response.status, 401)
+  assert.deepEqual(await response.json(), { error: 'unauthorized' })
 })
 
 test('applicant can update their own draft title, summary, or both', async () => {
@@ -478,6 +602,7 @@ test('applicant cannot update another applicant’s draft entry', async () => {
   const response = await patchEntry(202, entry.id, { title: 'Not yours' })
 
   assert.equal(response.status, 404)
+  assert.deepEqual(await response.json(), { error: 'not_found' })
 })
 
 test('draft entry update rejects empty, invalid, or missing fields', async () => {
@@ -487,6 +612,7 @@ test('draft entry update rejects empty, invalid, or missing fields', async () =>
 
   for (const body of [
     {},
+    { status: 'submitted' },
     { title: '' },
     { title: '   ' },
     { title: 42 },
@@ -496,19 +622,31 @@ test('draft entry update rejects empty, invalid, or missing fields', async () =>
   ]) {
     const response = await patchEntry(201, entry.id, body)
     assert.equal(response.status, 400, JSON.stringify(body))
+    assert.deepEqual(await response.json(), { error: 'invalid_entry' })
   }
+})
+
+test('entry update rejects invalid IDs and non-applicants with exact errors', async () => {
+  for (const entryId of ['0', 'not-an-id']) {
+    const response = await patchEntry(201, entryId, { title: 'Updated' })
+    assert.equal(response.status, 404)
+    assert.deepEqual(await response.json(), { error: 'not_found' })
+  }
+
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const entry = await createEntry(201, category.id)
+  const response = await patchEntry(1, entry.id, { title: 'Not an applicant' })
+  assert.equal(response.status, 403)
+  assert.deepEqual(await response.json(), { error: 'forbidden' })
 })
 
 test('submitted entry cannot be edited', async () => {
   const programme = await createProgramme(1)
   const category = await createCategory(1, programme.id)
   const entry = await createEntry(201, category.id)
-  await pool.query(
-    `UPDATE entries
-     SET status = 'submitted', submitted_at = NOW()
-     WHERE id = $1 AND applicant_id = $2`,
-    [entry.id, 201],
-  )
+  const submitResponse = await submitEntry(201, entry.id)
+  assert.equal(submitResponse.status, 200)
 
   const response = await patchEntry(201, entry.id, { title: 'Too late' })
   assert.equal(response.status, 409)
@@ -542,6 +680,17 @@ test('submission after the category deadline returns deadline_passed', async () 
   assert.deepEqual(await response.json(), { error: 'deadline_passed' })
 })
 
+test('submission at the deadline is rejected', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const entry = await createEntry(201, category.id)
+  await pool.query('UPDATE categories SET deadline = NOW() WHERE id = $1', [category.id])
+
+  const response = await submitEntry(201, entry.id)
+  assert.equal(response.status, 409)
+  assert.deepEqual(await response.json(), { error: 'deadline_passed' })
+})
+
 test('submitting an entry a second time returns already_submitted', async () => {
   const programme = await createProgramme(1)
   const category = await createCategory(1, programme.id)
@@ -562,6 +711,20 @@ test('another applicant cannot submit an entry they do not own', async () => {
   const response = await submitEntry(202, entry.id)
 
   assert.equal(response.status, 404)
+  assert.deepEqual(await response.json(), { error: 'not_found' })
+})
+
+test('submission rejects invalid IDs and non-applicant roles with exact errors', async () => {
+  for (const entryId of ['0', 'not-an-id']) {
+    const response = await submitEntry(201, entryId)
+    assert.equal(response.status, 404)
+    assert.deepEqual(await response.json(), { error: 'not_found' })
+  }
+
+  const { entry } = await createSubmittedEntry(1, 201)
+  const response = await submitEntry(1, entry.id)
+  assert.equal(response.status, 403)
+  assert.deepEqual(await response.json(), { error: 'forbidden' })
 })
 
 test('owning organiser assigns a judge to a submitted entry', async () => {
@@ -569,6 +732,7 @@ test('owning organiser assigns a judge to a submitted entry', async () => {
   const response = await assignJudge(1, entry.id, 101)
 
   assert.equal(response.status, 201)
+  assert.deepEqual(await response.json(), { entryId: entry.id, judgeId: 101 })
 })
 
 test('repeating a judge assignment returns 200 without creating a duplicate', async () => {
@@ -578,6 +742,7 @@ test('repeating a judge assignment returns 200 without creating a duplicate', as
 
   const secondResponse = await assignJudge(1, entry.id, 101)
   assert.equal(secondResponse.status, 200)
+  assert.deepEqual(await secondResponse.json(), { entryId: entry.id, judgeId: 101 })
 
   const { rows } = await pool.query(
     `SELECT COUNT(*)::int AS count
@@ -593,6 +758,7 @@ test('assignment rejects a user who is not a judge', async () => {
   const response = await assignJudge(1, entry.id, 201)
 
   assert.equal(response.status, 400)
+  assert.deepEqual(await response.json(), { error: 'invalid_judge' })
 })
 
 test('assignment rejects a draft entry with not_submitted', async () => {
@@ -610,6 +776,28 @@ test('non-owning organiser cannot assign a judge to the entry', async () => {
   const response = await assignJudge(2, entry.id, 101)
 
   assert.equal(response.status, 404)
+  assert.deepEqual(await response.json(), { error: 'not_found' })
+})
+
+test('assignment rejects malformed fields, non-organisers, and missing entries', async () => {
+  for (const [entryId, body] of [
+    ['not-an-id', { judgeId: 101 }],
+    ['1', {}],
+    ['1', { judgeId: 'not-a-number' }],
+  ]) {
+    const response = await assignJudge(1, entryId, body.judgeId)
+    assert.equal(response.status, 400)
+    assert.deepEqual(await response.json(), { error: 'invalid_assignment' })
+  }
+
+  const { entry } = await createSubmittedEntry(1, 201)
+  const forbiddenResponse = await assignJudge(101, entry.id, 102)
+  assert.equal(forbiddenResponse.status, 403)
+  assert.deepEqual(await forbiddenResponse.json(), { error: 'forbidden' })
+
+  const missingEntryResponse = await assignJudge(1, 999999999, 101)
+  assert.equal(missingEntryResponse.status, 404)
+  assert.deepEqual(await missingEntryResponse.json(), { error: 'not_found' })
 })
 
 test('judge sees only their assigned submitted entries with contract fields', async () => {
@@ -640,6 +828,23 @@ test('non-judge cannot access the judge entries list', async () => {
   const response = await getJudgeEntries(1)
 
   assert.equal(response.status, 403)
+  assert.deepEqual(await response.json(), { error: 'forbidden' })
+})
+
+test('judge entries endpoint rejects missing or unknown users and returns saved scores', async () => {
+  for (const headers of [{}, { 'X-User-Id': '999999' }]) {
+    const response = await fetch(`${baseUrl}/api/judge/entries`, { headers })
+    assert.equal(response.status, 401)
+    assert.deepEqual(await response.json(), { error: 'unauthorized' })
+  }
+
+  const { entry } = await createSubmittedEntry(1, 201)
+  assert.equal((await assignJudge(1, entry.id, 101)).status, 201)
+  assert.equal((await saveScore(101, entry.id, { score: 1 })).status, 200)
+  const response = await getJudgeEntries(101)
+  assert.equal(response.status, 200)
+  const entries = await response.json()
+  assert.ok(entries.some((item) => item.id === entry.id && item.myScore === 1))
 })
 
 test('entry is visible to its applicant, owning organiser, and assigned judge only', async () => {
@@ -650,17 +855,40 @@ test('entry is visible to its applicant, owning organiser, and assigned judge on
     const response = await getEntry(userId, entry.id)
     assert.equal(response.status, 200)
     const result = await response.json()
+    assert.deepEqual(Object.keys(result).sort(), [
+      'applicantId',
+      'categoryId',
+      'id',
+      'status',
+      'submittedAt',
+      'summary',
+      'title',
+    ])
     assert.equal(result.id, entry.id)
     assert.equal(result.categoryId, entry.categoryId)
     assert.equal(result.applicantId, 201)
     assert.equal(result.title, entry.title)
+    assert.equal(result.summary, entry.summary)
     assert.equal(result.status, 'submitted')
+    assert.ok(Number.isFinite(Date.parse(result.submittedAt)))
   }
 
   for (const userId of [202, 102, 2]) {
     const response = await getEntry(userId, entry.id)
     assert.equal(response.status, 404)
     assert.deepEqual(await response.json(), { error: 'not_found' })
+  }
+
+  for (const entryId of ['0', 'not-an-id', '999999999']) {
+    const response = await getEntry(201, entryId)
+    assert.equal(response.status, 404)
+    assert.deepEqual(await response.json(), { error: 'not_found' })
+  }
+
+  for (const headers of [{}, { 'X-User-Id': '999999' }]) {
+    const response = await fetch(`${baseUrl}/api/entries/${entry.id}`, { headers })
+    assert.equal(response.status, 401)
+    assert.deepEqual(await response.json(), { error: 'unauthorized' })
   }
 })
 
@@ -757,6 +985,7 @@ test('score endpoint rejects out-of-range, fractional, non-numeric, and missing 
   ]) {
     const response = await saveScore(101, entry.id, body)
     assert.equal(response.status, 400, JSON.stringify(body))
+    assert.deepEqual(await response.json(), { error: 'invalid_score' })
   }
 })
 
@@ -766,6 +995,7 @@ test('unassigned judge cannot score an entry', async () => {
 
   const response = await saveScore(102, entry.id, { score: 6 })
   assert.equal(response.status, 404)
+  assert.deepEqual(await response.json(), { error: 'not_found' })
 })
 
 test('assigned judge cannot save a score after the organiser closes judging', async () => {
@@ -784,6 +1014,25 @@ test('non-judge cannot save a score', async () => {
 
   const response = await saveScore(1, entry.id, { score: 6 })
   assert.equal(response.status, 403)
+  assert.deepEqual(await response.json(), { error: 'forbidden' })
+})
+
+test('score endpoint rejects invalid IDs and missing or unknown judges', async () => {
+  for (const entryId of ['0', 'not-an-id']) {
+    const response = await saveScore(101, entryId, { score: 5 })
+    assert.equal(response.status, 400)
+    assert.deepEqual(await response.json(), { error: 'invalid_score' })
+  }
+
+  for (const headers of [{}, { 'X-User-Id': '999999' }]) {
+    const response = await fetch(`${baseUrl}/api/entries/1/score`, {
+      method: 'PUT',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ score: 5 }),
+    })
+    assert.equal(response.status, 401)
+    assert.deepEqual(await response.json(), { error: 'unauthorized' })
+  }
 })
 
 test('leaderboard includes only submitted scored entries with averages and stable tie ordering', async () => {
@@ -792,11 +1041,13 @@ test('leaderboard includes only submitted scored entries with averages and stabl
   const firstTiedEntry = await createSubmittedEntryInCategory(201, category.id)
   const secondTiedEntry = await createSubmittedEntryInCategory(202, category.id)
   const unscoredEntry = await createSubmittedEntryInCategory(203, category.id)
-  const draftEntry = await createEntry(204, category.id)
+  const higherScoringEntry = await createSubmittedEntryInCategory(204, category.id)
+  const draftEntry = await createEntry(205, category.id)
 
   for (const [judgeId, score] of [[101, 8], [102, 9], [103, 9]]) {
     await assignAndScore(1, firstTiedEntry.id, judgeId, score)
     await assignAndScore(1, secondTiedEntry.id, judgeId, score)
+    await assignAndScore(1, higherScoringEntry.id, judgeId, 10)
   }
 
   const response = await getLeaderboard(1, category.id)
@@ -812,9 +1063,15 @@ test('leaderboard includes only submitted scored entries with averages and stabl
   ])
   assert.equal(result.page, 1)
   assert.equal(result.pageSize, 20)
-  assert.equal(result.totalEntries, 2)
+  assert.equal(result.totalEntries, 3)
   assert.equal(result.totalPages, 1)
   assert.deepEqual(result.items, [
+    {
+      entryId: higherScoringEntry.id,
+      title: higherScoringEntry.title,
+      averageScore: 10,
+      scoreCount: 3,
+    },
     {
       entryId: firstTiedEntry.id,
       title: firstTiedEntry.title,
@@ -868,6 +1125,16 @@ test('leaderboard paginates more than 20 scored entries in stable tie order', as
     secondPage.items.map(({ entryId }) => entryId),
     entryIds.slice().sort((left, right) => left - right).slice(20),
   )
+
+  const afterLastPageResponse = await getLeaderboard(1, category.id, 3)
+  assert.equal(afterLastPageResponse.status, 200)
+  assert.deepEqual(await afterLastPageResponse.json(), {
+    page: 3,
+    pageSize: 20,
+    totalEntries: 21,
+    totalPages: 2,
+    items: [],
+  })
 })
 
 test('organiser cannot view another organiser’s category leaderboard', async () => {
@@ -887,5 +1154,61 @@ test('leaderboard rejects malformed page numbers with invalid_page', async () =>
     const response = await getLeaderboard(1, category.id, page)
     assert.equal(response.status, 400, page)
     assert.deepEqual(await response.json(), { error: 'invalid_page' })
+  }
+})
+
+test('leaderboard defaults to page one and returns empty results for empty or out-of-range pages', async () => {
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const baseUrlForCategory = `${baseUrl}/api/categories/${category.id}/leaderboard`
+
+  const defaultPageResponse = await fetch(baseUrlForCategory, {
+    headers: { 'X-User-Id': '1' },
+  })
+  assert.equal(defaultPageResponse.status, 200)
+  assert.deepEqual(await defaultPageResponse.json(), {
+    page: 1,
+    pageSize: 20,
+    totalEntries: 0,
+    totalPages: 0,
+    items: [],
+  })
+
+  const outOfRangeResponse = await fetch(`${baseUrlForCategory}?page=2`, {
+    headers: { 'X-User-Id': '1' },
+  })
+  assert.equal(outOfRangeResponse.status, 200)
+  assert.deepEqual(await outOfRangeResponse.json(), {
+    page: 2,
+    pageSize: 20,
+    totalEntries: 0,
+    totalPages: 0,
+    items: [],
+  })
+})
+
+test('leaderboard rejects invalid category IDs, non-organisers, and missing users', async () => {
+  for (const categoryId of ['0', 'not-an-id', '999999999']) {
+    const response = await getLeaderboard(1, categoryId)
+    assert.equal(response.status, 404)
+    assert.deepEqual(await response.json(), { error: 'not_found' })
+  }
+
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const forbiddenResponse = await fetch(
+    `${baseUrl}/api/categories/${category.id}/leaderboard`,
+    { headers: { 'X-User-Id': '101' } },
+  )
+  assert.equal(forbiddenResponse.status, 403)
+  assert.deepEqual(await forbiddenResponse.json(), { error: 'forbidden' })
+
+  for (const headers of [{}, { 'X-User-Id': '999999' }]) {
+    const response = await fetch(
+      `${baseUrl}/api/categories/${category.id}/leaderboard`,
+      { headers },
+    )
+    assert.equal(response.status, 401)
+    assert.deepEqual(await response.json(), { error: 'unauthorized' })
   }
 })
