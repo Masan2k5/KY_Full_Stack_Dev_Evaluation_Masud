@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import './App.css'
+import { putScoreWithRetry } from './score-request.js'
 
 function App() {
   const [judgeId] = useState(() => new URLSearchParams(window.location.search).get('as'))
@@ -79,14 +80,13 @@ function App() {
     setSaving(true)
     setSaved(false)
     setError('')
+    const entryId = selectedEntry.id
+    const scoreToSave = parsedScore
     try {
-      const response = await fetch(`/api/entries/${selectedEntry.id}/score`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-User-Id': judgeId,
-        },
-        body: JSON.stringify({ score: parsedScore }),
+      const response = await putScoreWithRetry({
+        entryId,
+        judgeId,
+        score: scoreToSave,
       })
       if (!response.ok) {
         const result = await response.json().catch(() => null)
@@ -103,7 +103,7 @@ function App() {
       const result = await response.json()
       setEntries((currentEntries) =>
         currentEntries.map((entry) =>
-          entry.id === selectedEntry.id ? { ...entry, myScore: result.score } : entry,
+          entry.id === entryId ? { ...entry, myScore: result.score } : entry,
         ),
       )
       setScore(String(result.score))
