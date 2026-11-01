@@ -28,6 +28,7 @@
 - Asked AI to verify S7 tests use isolated API-created fixtures, scoped assertions, and dependency-safe cleanup.
 - Asked AI to verify Singapore deadline conversion, submission boundary behavior, and existing assignment/score retry and concurrency guarantees.
 - Asked AI to verify leaderboard eligibility, aggregation, ordering, page validation, and populated-page boundaries (S7).
+- Asked AI to document S8 implementation decisions and keep the README focused on setup while deferring REVIEW.md until Part C.
 
 ## AI mistakes, gaps, and how I checked
 - The initial setup guidance described the project structure before the backend files existed. I checked the directory and package files, then had the backend starter files added.
