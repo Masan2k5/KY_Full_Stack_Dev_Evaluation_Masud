@@ -113,6 +113,17 @@ async function assignJudge(organiserId, entryId, judgeId) {
   })
 }
 
+async function saveScore(judgeId, entryId, body) {
+  return fetch(`${baseUrl}/api/entries/${entryId}/score`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-User-Id': String(judgeId),
+    },
+    body: JSON.stringify(body),
+  })
+}
+
 async function getJudgeEntries(judgeId) {
   return fetch(`${baseUrl}/api/judge/entries`, {
     headers: { 'X-User-Id': String(judgeId) },
@@ -629,4 +640,126 @@ test('entry is visible to its applicant, owning organiser, and assigned judge on
     assert.equal(response.status, 404)
     assert.deepEqual(await response.json(), { error: 'not_found' })
   }
+})
+
+test('assigned judge can save a valid score', async () => {
+  const { entry } = await createSubmittedEntry(1, 201)
+  assert.equal((await assignJudge(1, entry.id, 101)).status, 201)
+
+  const response = await saveScore(101, entry.id, { score: 8 })
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), {
+    entryId: entry.id,
+    judgeId: 101,
+    score: 8,
+  })
+})
+
+test('assigned judge can change their score without creating another row', async () => {
+  const { entry } = await createSubmittedEntry(1, 201)
+  assert.equal((await assignJudge(1, entry.id, 101)).status, 201)
+  assert.equal((await saveScore(101, entry.id, { score: 4 })).status, 200)
+
+  const response = await saveScore(101, entry.id, { score: 9 })
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), {
+    entryId: entry.id,
+    judgeId: 101,
+    score: 9,
+  })
+
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS count, MAX(score)::int AS score
+     FROM scores
+     WHERE entry_id = $1 AND judge_id = $2`,
+    [entry.id, 101],
+  )
+  assert.deepEqual(rows[0], { count: 1, score: 9 })
+})
+
+test('retrying the same score does not create a duplicate score', async () => {
+  const { entry } = await createSubmittedEntry(1, 201)
+  assert.equal((await assignJudge(1, entry.id, 101)).status, 201)
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await saveScore(101, entry.id, { score: 7 })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), {
+      entryId: entry.id,
+      judgeId: 101,
+      score: 7,
+    })
+  }
+
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS count
+     FROM scores
+     WHERE entry_id = $1 AND judge_id = $2`,
+    [entry.id, 101],
+  )
+  assert.equal(rows[0].count, 1)
+})
+
+test('concurrent score updates leave one row with one submitted score value', async () => {
+  const { entry } = await createSubmittedEntry(1, 201)
+  assert.equal((await assignJudge(1, entry.id, 101)).status, 201)
+
+  const responses = await Promise.all([
+    saveScore(101, entry.id, { score: 3 }),
+    saveScore(101, entry.id, { score: 10 }),
+  ])
+  for (const response of responses) {
+    assert.equal(response.status, 200)
+  }
+
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS count, MAX(score)::int AS score
+     FROM scores
+     WHERE entry_id = $1 AND judge_id = $2`,
+    [entry.id, 101],
+  )
+  assert.equal(rows[0].count, 1)
+  assert.ok([3, 10].includes(rows[0].score))
+})
+
+test('score endpoint rejects out-of-range, fractional, non-numeric, and missing scores', async () => {
+  const { entry } = await createSubmittedEntry(1, 201)
+  assert.equal((await assignJudge(1, entry.id, 101)).status, 201)
+
+  for (const body of [
+    { score: 0 },
+    { score: 11 },
+    { score: 4.5 },
+    { score: '8' },
+    {},
+  ]) {
+    const response = await saveScore(101, entry.id, body)
+    assert.equal(response.status, 400, JSON.stringify(body))
+  }
+})
+
+test('unassigned judge cannot score an entry', async () => {
+  const { entry } = await createSubmittedEntry(1, 201)
+  assert.equal((await assignJudge(1, entry.id, 101)).status, 201)
+
+  const response = await saveScore(102, entry.id, { score: 6 })
+  assert.equal(response.status, 404)
+})
+
+test('assigned judge cannot save a score after the organiser closes judging', async () => {
+  const { programme, entry } = await createSubmittedEntry(1, 201)
+  assert.equal((await assignJudge(1, entry.id, 101)).status, 201)
+  assert.equal((await closeJudging(1, programme.id)).status, 200)
+
+  const response = await saveScore(101, entry.id, { score: 6 })
+  assert.equal(response.status, 409)
+  assert.deepEqual(await response.json(), { error: 'judging_closed' })
+})
+
+test('non-judge cannot save a score', async () => {
+  const { entry } = await createSubmittedEntry(1, 201)
+  assert.equal((await assignJudge(1, entry.id, 101)).status, 201)
+
+  const response = await saveScore(1, entry.id, { score: 6 })
+  assert.equal(response.status, 403)
 })

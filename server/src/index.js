@@ -482,6 +482,75 @@ app.get('/api/judge/entries', requireUser, async (request, response, next) => {
   }
 })
 
+app.put('/api/entries/:id/score', requireUser, async (request, response, next) => {
+  if (request.user.role !== 'judge') {
+    response.status(403).json({ error: 'forbidden' })
+    return
+  }
+
+  const entryIdText = request.params.id
+  const entryId = Number(entryIdText)
+  const score = request.body?.score
+  if (
+    !/^[1-9]\d*$/.test(entryIdText) ||
+    !Number.isSafeInteger(entryId) ||
+    typeof score !== 'number' ||
+    !Number.isInteger(score) ||
+    score < 1 ||
+    score > 10
+  ) {
+    response.status(400).json({ error: 'invalid_score' })
+    return
+  }
+
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO scores (entry_id, judge_id, score)
+       SELECT e.id, ja.judge_id, $3
+       FROM entries AS e
+       JOIN judge_assignments AS ja ON ja.entry_id = e.id
+       JOIN categories AS c ON c.id = e.category_id
+       JOIN programmes AS p ON p.id = c.programme_id
+       WHERE e.id = $1
+         AND ja.judge_id = $2
+         AND e.status = 'submitted'
+         AND p.judging_closed = FALSE
+       ON CONFLICT (entry_id, judge_id)
+       DO UPDATE SET score = EXCLUDED.score, updated_at = NOW()
+       RETURNING entry_id AS "entryId", judge_id AS "judgeId", score`,
+      [entryId, request.user.id, score],
+    )
+
+    if (rows.length === 0) {
+      const { rows: assignments } = await pool.query(
+        `SELECT p.judging_closed AS "judgingClosed"
+         FROM judge_assignments AS ja
+         JOIN entries AS e ON e.id = ja.entry_id
+         JOIN categories AS c ON c.id = e.category_id
+         JOIN programmes AS p ON p.id = c.programme_id
+         WHERE ja.entry_id = $1 AND ja.judge_id = $2`,
+        [entryId, request.user.id],
+      )
+
+      if (assignments[0]?.judgingClosed) {
+        response.status(409).json({ error: 'judging_closed' })
+        return
+      }
+
+      response.status(404).json({ error: 'not_found' })
+      return
+    }
+
+    response.json({
+      entryId: Number(rows[0].entryId),
+      judgeId: Number(rows[0].judgeId),
+      score: Number(rows[0].score),
+    })
+  } catch (error) {
+    next(error)
+  }
+})
+
 app.post('/api/programmes', requireUser, async (request, response, next) => {
   if (!requireOrganiser(request, response)) {
     return

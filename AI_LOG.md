@@ -17,6 +17,9 @@
 - Asked AI to implement `POST /api/entries/:id/assignments` with database-side ownership and submission checks.
 - Asked AI to test and implement the judge-only assigned entries list, including assigned-entry visibility and role restrictions.
 - Asked AI to test and implement individual entry access for applicants, owning organisers, assigned judges, and unauthorized users.
+- Asked AI to add S4 scoring tests for saves, updates, retries, score validation, assignment, role, and closed-judging behavior.
+- Asked AI to implement `PUT /api/entries/:id/score` with assignment and open-judging checks plus an idempotent score upsert.
+- Asked AI to add a concurrent score-update test confirming one score row remains with one of the submitted values.
 
 ## AI mistakes, gaps, and how I checked
 - The initial setup guidance described the project structure before the backend files existed. I checked the directory and package files, then had the backend starter files added.
