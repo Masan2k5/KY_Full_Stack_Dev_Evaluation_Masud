@@ -42,6 +42,8 @@
 - Asked AI to exercise all 400 score saves in bounded groups of 20 concurrent API requests, using varied valid scores (S11).
 - Asked AI to verify each judge’s exact 20 fixture entries, ID ordering, and expected scores through the judge-entry API, scoped to test fixture IDs (S11).
 - Asked AI to run `npm test` and record the S11 workload outcome and observed runtime without imposing a latency threshold.
+- Asked AI to update the README with the brief’s Node.js 20+ prerequisite and exact clean-machine command order (S12).
+- Asked AI to retain the `db:reset` data-loss warning, explain running tests from a second terminal while `dev` remains active, review the README diff, and record the S12 commit message.
 
 ## AI mistakes, gaps, and how I checked
 - The initial setup guidance described the project structure before the backend files existed. I checked the directory and package files, then had the backend starter files added.
@@ -56,6 +58,7 @@
 - The database reset seed contains only 12 judges, so I added eight temporary judge fixtures for the S11 scale test under a table lock and clean them up after the API-created entry/programme fixtures. No database reset is needed.
 - The first S11 test run caught PostgreSQL rejecting `offset` as a generated-series column alias. I renamed the alias and reran the complete suite.
 - S11 scale verification passed: all 400 score saves returned success in batches of 20, and all 20 judges returned their 20 fixture entries with expected scores. The workload test took about 595 ms in this run; `npm test` passed with 62 server tests and 5 client tests.
+- During S12 review, the original README omitted the Node.js 20+ requirement and listed setup commands in a different order. I updated the prerequisites and exact command sequence, preserved the database-reset warning, and clarified that `npm test` runs from a second terminal after starting `npm run dev`.
 
 ## Suggestions I rejected
 - AI initially showed the Step 3 commit message as: "S3: add judge assignments and entry access". I rejected that and instead changed the commit message to "S3 (Step 3): Add judge assignments and entry access" as that explains the S3 naming even better.

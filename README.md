@@ -4,7 +4,7 @@ Full-stack awards application using React, Express, and PostgreSQL.
 
 ## Prerequisites
 
-- Node.js and npm
+- Node.js 20+ and npm. Check the installed version with `node --version`.
 - Docker with Docker Compose
 
 ## Setup
@@ -12,18 +12,18 @@ Full-stack awards application using React, Express, and PostgreSQL.
 From the project root:
 
 ```sh
+docker compose up -d
 npm install
-docker compose up -d db
 npm run db:reset
+npm run dev
+npm test
 ```
 
 `npm run db:reset` drops and recreates the PostgreSQL `public` schema, then seeds the development users. Do not run it against a database containing data you need to keep.
 
-## Run the application
+`npm run dev` keeps running in the foreground. Start it, then run `npm test` from a second terminal at the project root.
 
-```sh
-npm run dev
-```
+## Application URLs
 
 - Web app: <http://localhost:5173>
 - API: <http://localhost:4000>
