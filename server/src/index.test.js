@@ -8,6 +8,7 @@ const address = server.address()
 const baseUrl = `http://127.0.0.1:${address.port}`
 const createdProgrammeIds = new Set()
 const createdEntryIds = new Set()
+const createdJudgeIds = new Set()
 
 async function createProgramme(organiserId, name = `Test ${randomUUID()}`) {
   const response = await fetch(`${baseUrl}/api/programmes`, {
@@ -171,6 +172,36 @@ async function getCategories(userId) {
   })
 }
 
+async function createScaleTestJudges(count) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE')
+    const { rows: [{ firstId }] } = await client.query(
+      'SELECT COALESCE(MAX(id), 0)::int + 1 AS "firstId" FROM users',
+    )
+    const { rows } = await client.query(
+      `INSERT INTO users (id, name, role, organisation_id)
+       SELECT $1 + offset_value,
+              'Scale Test Judge ' || ($1 + offset_value), 'judge', 1
+       FROM generate_series(0, $2 - 1) AS series(offset_value)
+       RETURNING id`,
+      [firstId, count],
+    )
+    await client.query('COMMIT')
+    const judgeIds = rows.map(({ id }) => Number(id))
+    for (const judgeId of judgeIds) {
+      createdJudgeIds.add(judgeId)
+    }
+    return judgeIds
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
 after(async () => {
   await new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()))
@@ -186,6 +217,12 @@ after(async () => {
     await pool.query(
       'DELETE FROM programmes WHERE id = ANY($1::bigint[])',
       [[...createdProgrammeIds]],
+    )
+  }
+  if (createdJudgeIds.size > 0) {
+    await pool.query(
+      'DELETE FROM users WHERE id = ANY($1::int[])',
+      [[...createdJudgeIds]],
     )
   }
   await pool.end()
@@ -918,6 +955,83 @@ test('judge entries endpoint rejects missing or unknown users and returns saved 
   assert.equal(response.status, 200)
   const entries = await response.json()
   assert.ok(entries.some((item) => item.id === entry.id && item.myScore === 1))
+})
+
+test('20 judges can score 400 entries through concurrent API requests', async () => {
+  const seededJudgeIds = Array.from({ length: 12 }, (_, index) => 101 + index)
+  const judgeIds = [
+    ...seededJudgeIds,
+    ...await createScaleTestJudges(8),
+  ]
+  const programme = await createProgramme(1)
+  const category = await createCategory(1, programme.id)
+  const entries = []
+
+  for (let offset = 0; offset < 400; offset += 20) {
+    entries.push(...await Promise.all(
+      Array.from({ length: 20 }, () => createEntry(201, category.id)),
+    ))
+  }
+
+  for (let offset = 0; offset < entries.length; offset += 20) {
+    const batch = entries.slice(offset, offset + 20)
+    const responses = await Promise.all(
+      batch.map(({ id }) => submitEntry(201, id)),
+    )
+    assert.ok(responses.every((response) => response.status === 200))
+  }
+
+  const assignments = entries.map((entry, index) => ({
+    entry,
+    judgeId: judgeIds[Math.floor(index / 20)],
+  }))
+  for (let offset = 0; offset < assignments.length; offset += 20) {
+    const batch = assignments.slice(offset, offset + 20)
+    const responses = await Promise.all(
+      batch.map(({ entry, judgeId }) => assignJudge(1, entry.id, judgeId)),
+    )
+    assert.ok(responses.every((response) => response.status === 201))
+  }
+
+  const expectedScores = new Map()
+  for (let entryOffset = 0; entryOffset < 20; entryOffset += 1) {
+    const responses = await Promise.all(judgeIds.map((judgeId, judgeIndex) => {
+      const entry = entries[judgeIndex * 20 + entryOffset]
+      const score = ((judgeIndex + entryOffset) % 10) + 1
+      return saveScore(judgeId, entry.id, { score }).then((response) => {
+        assert.equal(response.status, 200)
+        expectedScores.set(entry.id, score)
+      })
+    }))
+    assert.equal(responses.length, 20)
+  }
+  assert.equal(expectedScores.size, 400)
+
+  const entryIds = new Set(entries.map(({ id }) => id))
+  for (const [judgeIndex, judgeId] of judgeIds.entries()) {
+    const response = await getJudgeEntries(judgeId)
+    assert.equal(response.status, 200)
+    const listedEntries = await response.json()
+    assert.ok(Array.isArray(listedEntries))
+
+    const expectedEntries = entries
+      .slice(judgeIndex * 20, (judgeIndex + 1) * 20)
+      .map((entry) => ({
+        id: entry.id,
+        categoryId: entry.categoryId,
+        title: entry.title,
+        myScore: expectedScores.get(entry.id),
+      }))
+      .sort((a, b) => a.id - b.id)
+    const listedFixtureEntries = listedEntries
+      .filter(({ id }) => entryIds.has(id))
+    assert.equal(listedFixtureEntries.length, 20)
+    assert.deepEqual(
+      listedFixtureEntries.map(({ id }) => id),
+      expectedEntries.map(({ id }) => id),
+    )
+    assert.deepEqual(listedFixtureEntries, expectedEntries)
+  }
 })
 
 test('entry is visible to its applicant, owning organiser, and assigned judge only', async () => {

@@ -36,6 +36,12 @@
 - Asked AI to stream each list response as a JSON array, writing separators per row and retaining only one batch in memory (S10).
 - Asked AI to preserve authentication and role checks before streaming, terminate incomplete responses on post-header errors, and ensure pooled database resources are released (S10).
 - Asked AI to add isolated batch-boundary tests for API-created programmes, categories, and assigned entries, checking arrays, fixture fields, ordering, and independence from unrelated rows (S10).
+- Asked AI to verify the 20-judge, 400-entry scale requirement using the existing API integration-test setup without resetting the database (S11).
+- Asked AI to create and submit the 400 scale-test entries through the existing API helpers and retain their fixture IDs for cleanup (S11).
+- Asked AI to distribute the 400 submitted entries evenly across 20 judges using the assignment API (S11).
+- Asked AI to exercise all 400 score saves in bounded groups of 20 concurrent API requests, using varied valid scores (S11).
+- Asked AI to verify each judge’s exact 20 fixture entries, ID ordering, and expected scores through the judge-entry API, scoped to test fixture IDs (S11).
+- Asked AI to run `npm test` and record the S11 workload outcome and observed runtime without imposing a latency threshold.
 
 ## AI mistakes, gaps, and how I checked
 - The initial setup guidance described the project structure before the backend files existed. I checked the directory and package files, then had the backend starter files added.
@@ -47,6 +53,9 @@
 - AI initially left the S6 judge score-saving prompt at the end of the AI log after adding later S7 prompts, making the prompt history out of order. I caught and moved it back into chronological order during final diff review.
 - In the S9 browser verification, AI's first assertion expected a different score than its mocked successful response returned. The mismatch was in the verification script, not the app; I corrected the expected value and reran all browser scenarios successfully.
 - During S10 review, AI initially forwarded a streaming error occurring after headers were sent to Express's default handler. I changed the error middleware to explicitly destroy the incomplete response instead of attempting another JSON body.
+- The database reset seed contains only 12 judges, so I added eight temporary judge fixtures for the S11 scale test under a table lock and clean them up after the API-created entry/programme fixtures. No database reset is needed.
+- The first S11 test run caught PostgreSQL rejecting `offset` as a generated-series column alias. I renamed the alias and reran the complete suite.
+- S11 scale verification passed: all 400 score saves returned success in batches of 20, and all 20 judges returned their 20 fixture entries with expected scores. The workload test took about 595 ms in this run; `npm test` passed with 62 server tests and 5 client tests.
 
 ## Suggestions I rejected
 - AI initially showed the Step 3 commit message as: "S3: add judge assignments and entry access". I rejected that and instead changed the commit message to "S3 (Step 3): Add judge assignments and entry access" as that explains the S3 naming even better.
