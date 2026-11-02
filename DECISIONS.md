@@ -35,3 +35,9 @@ This document records implementation assumptions and decisions that affect how t
 - **Decision:** `npm run db:reset` drops and recreates the PostgreSQL `public` schema, then seeds the required development users and organisations.
 - **Reason:** Provides a predictable local dataset for development and API testing.
 - **Trade-off / limitation:** This deletes all data in that schema. Do not use it against a database containing data that needs to be retained.
+
+## List endpoint batch size
+
+- **Decision:** Use a fixed batch size of 100 rows when retrieving programmes, categories, and assigned judge entries for their existing array responses.
+- **Reason:** Ascending unique-ID keyset pagination bounds each database fetch and keeps batches in stable order while preserving the API response shape.
+- **Trade-off / limitation:** The complete response can still be large, and total database work still scales with the number of matching rows. The implementation must stream batches rather than accumulating them into one in-memory array.

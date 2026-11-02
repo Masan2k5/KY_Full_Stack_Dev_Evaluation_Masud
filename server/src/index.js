@@ -3,9 +3,12 @@ looks up a user from the X-User-Id header */
 
 import express from 'express'
 import pg from 'pg'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 
 const { Pool } = pg
+const LIST_BATCH_SIZE = 100
 export const pool = new Pool({
   connectionString:
     process.env.DATABASE_URL ??
@@ -14,6 +17,33 @@ export const pool = new Pool({
 
 export const app = express()
 app.use(express.json())
+
+async function sendBatchedJsonArray(response, fetchBatch, mapRow) {
+  response.type('json')
+
+  async function* jsonArray() {
+    yield '['
+    let lastId = null
+    let first = true
+
+    while (true) {
+      const rows = await fetchBatch(lastId)
+      for (const row of rows) {
+        yield `${first ? '' : ','}${JSON.stringify(mapRow(row))}`
+        first = false
+        lastId = row.id
+      }
+
+      if (rows.length < LIST_BATCH_SIZE) {
+        break
+      }
+    }
+
+    yield ']'
+  }
+
+  await pipeline(Readable.from(jsonArray()), response)
+}
 
 async function requireUser(request, response, next) {
   const userId = Number(request.get('X-User-Id'))
@@ -460,23 +490,31 @@ app.get('/api/judge/entries', requireUser, async (request, response, next) => {
   }
 
   try {
-    const { rows } = await pool.query(
-      `SELECT e.id, e.category_id AS "categoryId", e.title,
-              s.score AS "myScore"
-       FROM judge_assignments AS ja
-       JOIN entries AS e ON e.id = ja.entry_id
-       LEFT JOIN scores AS s
-         ON s.entry_id = ja.entry_id AND s.judge_id = ja.judge_id
-       WHERE ja.judge_id = $1 AND e.status = 'submitted'
-       ORDER BY e.id`,
-      [request.user.id],
+    await sendBatchedJsonArray(
+      response,
+      async (lastId) => {
+        const { rows } = await pool.query(
+          `SELECT e.id, e.category_id AS "categoryId", e.title,
+                  s.score AS "myScore"
+           FROM judge_assignments AS ja
+           JOIN entries AS e ON e.id = ja.entry_id
+           LEFT JOIN scores AS s
+             ON s.entry_id = ja.entry_id AND s.judge_id = ja.judge_id
+           WHERE ja.judge_id = $1 AND e.status = 'submitted'
+             AND ($2::bigint IS NULL OR e.id > $2)
+           ORDER BY e.id
+           LIMIT $3`,
+          [request.user.id, lastId, LIST_BATCH_SIZE],
+        )
+        return rows
+      },
+      (entry) => ({
+        ...entry,
+        id: Number(entry.id),
+        categoryId: Number(entry.categoryId),
+        myScore: entry.myScore === null ? null : Number(entry.myScore),
+      }),
     )
-    response.json(rows.map((entry) => ({
-      ...entry,
-      id: Number(entry.id),
-      categoryId: Number(entry.categoryId),
-      myScore: entry.myScore === null ? null : Number(entry.myScore),
-    })))
   } catch (error) {
     next(error)
   }
@@ -583,18 +621,26 @@ app.get('/api/programmes', requireUser, async (request, response, next) => {
   }
 
   try {
-    const { rows } = await pool.query(
-      `SELECT id, name, organiser_id AS "organiserId",
-              judging_closed AS "judgingClosed"
-       FROM programmes
-       WHERE organiser_id = $1
-       ORDER BY id`,
-      [request.user.id],
+    await sendBatchedJsonArray(
+      response,
+      async (lastId) => {
+        const { rows } = await pool.query(
+          `SELECT id, name, organiser_id AS "organiserId",
+                  judging_closed AS "judgingClosed"
+           FROM programmes
+           WHERE organiser_id = $1
+             AND ($2::bigint IS NULL OR id > $2)
+           ORDER BY id
+           LIMIT $3`,
+          [request.user.id, lastId, LIST_BATCH_SIZE],
+        )
+        return rows
+      },
+      (programme) => ({
+        ...programme,
+        id: Number(programme.id),
+      }),
     )
-    response.json(rows.map((programme) => ({
-      ...programme,
-      id: Number(programme.id),
-    })))
   } catch (error) {
     next(error)
   }
@@ -602,17 +648,26 @@ app.get('/api/programmes', requireUser, async (request, response, next) => {
 
 app.get('/api/categories', requireUser, async (_request, response, next) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT id, programme_id AS "programmeId", name, deadline
-       FROM categories
-       ORDER BY id`,
+    await sendBatchedJsonArray(
+      response,
+      async (lastId) => {
+        const { rows } = await pool.query(
+          `SELECT id, programme_id AS "programmeId", name, deadline
+           FROM categories
+           WHERE ($1::bigint IS NULL OR id > $1)
+           ORDER BY id
+           LIMIT $2`,
+          [lastId, LIST_BATCH_SIZE],
+        )
+        return rows
+      },
+      (category) => ({
+        ...category,
+        id: Number(category.id),
+        programmeId: Number(category.programmeId),
+        deadline: new Date(category.deadline).toISOString(),
+      }),
     )
-    response.json(rows.map((category) => ({
-      ...category,
-      id: Number(category.id),
-      programmeId: Number(category.programmeId),
-      deadline: new Date(category.deadline).toISOString(),
-    })))
   } catch (error) {
     next(error)
   }
@@ -805,8 +860,12 @@ app.post(
   },
 )
 
-app.use((error, _request, response, _next) => {
+app.use((error, _request, response, next) => {
   console.error('Request failed:', error)
+  if (response.headersSent) {
+    response.destroy(error)
+    return
+  }
   response.status(500).json({ error: 'internal_error' })
 })
 

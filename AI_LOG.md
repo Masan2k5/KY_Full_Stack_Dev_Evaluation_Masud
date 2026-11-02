@@ -31,6 +31,11 @@
 - Asked AI to document S8 implementation decisions and keep the README focused on setup while deferring REVIEW.md until Part C.
 - Asked AI to add bounded client retries only to score PUT requests, reusing the captured entry ID, judge ID, and score (S9).
 - Asked AI to test the S9 retry policy for immediate success, transient failures, retry exhaustion, and non-retryable 4xx errors.
+- Asked AI to choose a fixed list-query batch size and document its memory/response-size trade-off for S10.
+- Asked AI to fetch the programme, category, and judge-entry lists in stable, ordered batches while preserving the judge filters and response arrays (S10).
+- Asked AI to stream each list response as a JSON array, writing separators per row and retaining only one batch in memory (S10).
+- Asked AI to preserve authentication and role checks before streaming, terminate incomplete responses on post-header errors, and ensure pooled database resources are released (S10).
+- Asked AI to add isolated batch-boundary tests for API-created programmes, categories, and assigned entries, checking arrays, fixture fields, ordering, and independence from unrelated rows (S10).
 
 ## AI mistakes, gaps, and how I checked
 - The initial setup guidance described the project structure before the backend files existed. I checked the directory and package files, then had the backend starter files added.
@@ -41,6 +46,7 @@
 - During S7 coverage work, AI initially used a direct database update to mark a draft entry submitted in a test. The isolation review caught it; I replaced it with the submission API. Direct SQL remains only for controlled deadline-boundary setup, row assertions, and fixture cleanup.
 - AI initially left the S6 judge score-saving prompt at the end of the AI log after adding later S7 prompts, making the prompt history out of order. I caught and moved it back into chronological order during final diff review.
 - In the S9 browser verification, AI's first assertion expected a different score than its mocked successful response returned. The mismatch was in the verification script, not the app; I corrected the expected value and reran all browser scenarios successfully.
+- During S10 review, AI initially forwarded a streaming error occurring after headers were sent to Express's default handler. I changed the error middleware to explicitly destroy the incomplete response instead of attempting another JSON body.
 
 ## Suggestions I rejected
 - AI initially showed the Step 3 commit message as: "S3: add judge assignments and entry access". I rejected that and instead changed the commit message to "S3 (Step 3): Add judge assignments and entry access" as that explains the S3 naming even better.

@@ -476,6 +476,79 @@ test('categories endpoint rejects missing or unknown user IDs', async () => {
   assert.deepEqual(await unknownUserResponse.json(), { error: 'unauthorized' })
 })
 
+test('list endpoints return ordered arrays across batch boundaries', async () => {
+  const programmes = await Promise.all(
+    Array.from({ length: 101 }, () => createProgramme(1)),
+  )
+  const programmeResponse = await fetch(`${baseUrl}/api/programmes`, {
+    headers: { 'X-User-Id': '1' },
+  })
+  assert.equal(programmeResponse.status, 200)
+  const listedProgrammes = await programmeResponse.json()
+  assert.ok(Array.isArray(listedProgrammes))
+  const expectedProgrammes = [...programmes].sort((a, b) => a.id - b.id)
+  const programmeIds = new Set(expectedProgrammes.map(({ id }) => id))
+  assert.deepEqual(
+    listedProgrammes
+      .filter(({ id }) => programmeIds.has(id))
+      .sort((a, b) => a.id - b.id),
+    expectedProgrammes,
+  )
+
+  const programme = await createProgramme(1)
+  const categories = await Promise.all(
+    Array.from(
+      { length: 101 },
+      () => createCategory(1, programme.id),
+    ),
+  )
+  const categoryResponse = await getCategories(1)
+  assert.equal(categoryResponse.status, 200)
+  const listedCategories = await categoryResponse.json()
+  assert.ok(Array.isArray(listedCategories))
+  const expectedCategories = [...categories].sort((a, b) => a.id - b.id)
+  const categoryIds = new Set(expectedCategories.map(({ id }) => id))
+  assert.deepEqual(
+    listedCategories
+      .filter(({ id }) => categoryIds.has(id))
+      .sort((a, b) => a.id - b.id),
+    expectedCategories,
+  )
+
+  const entries = await Promise.all(
+    Array.from(
+      { length: 101 },
+      () => createEntry(201, categories[0].id),
+    ),
+  )
+  const submissionResponses = await Promise.all(
+    entries.map(({ id }) => submitEntry(201, id)),
+  )
+  assert.ok(submissionResponses.every((response) => response.status === 200))
+  const assignmentResponses = await Promise.all(
+    entries.map(({ id }) => assignJudge(1, id, 101)),
+  )
+  assert.ok(assignmentResponses.every((response) => response.status === 201))
+
+  const judgeResponse = await getJudgeEntries(101)
+  assert.equal(judgeResponse.status, 200)
+  const listedEntries = await judgeResponse.json()
+  assert.ok(Array.isArray(listedEntries))
+  const expectedEntries = [...entries]
+    .map(({ id, categoryId, title }) => ({
+      id,
+      categoryId,
+      title,
+      myScore: null,
+    }))
+    .sort((a, b) => a.id - b.id)
+  const entryIds = new Set(expectedEntries.map(({ id }) => id))
+  assert.deepEqual(
+    listedEntries.filter(({ id }) => entryIds.has(id)),
+    expectedEntries,
+  )
+})
+
 test('applicant can create a draft entry with the required response', async () => {
   const programme = await createProgramme(1)
   const category = await createCategory(1, programme.id)
