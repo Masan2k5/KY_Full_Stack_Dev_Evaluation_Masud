@@ -43,7 +43,8 @@
 - Asked AI to verify each judge’s exact 20 fixture entries, ID ordering, and expected scores through the judge-entry API, scoped to test fixture IDs (S11).
 - Asked AI to run `npm test` and record the S11 workload outcome and observed runtime without imposing a latency threshold.
 - Asked AI to update the README with the brief’s Node.js 20+ prerequisite and exact clean-machine command order (S12).
-- Asked AI to retain the `db:reset` data-loss warning, explain running tests from a second terminal while `dev` remains active, review the README diff, and record the S12 commit message.
+- Asked AI to retain the `db:reset` data-loss warning, explain running tests from a second terminal while `dev` remains active, and review the README diff.
+- Asked AI to review the supplied Part C search/export PR, rank production risks, provide a corrected example for the top issue, and write `REVIEW.md` within 300 words.
 
 ## AI mistakes, gaps, and how I checked
 - The initial setup guidance described the project structure before the backend files existed. I checked the directory and package files, then had the backend starter files added.
